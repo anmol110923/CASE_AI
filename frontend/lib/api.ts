@@ -56,9 +56,15 @@ export function endInterview(id: string): Promise<Session> {
   return request<Session>(`/sessions/${id}/end`, { method: "POST" });
 }
 
+function audioFilename(blob: Blob): string {
+  if (blob.type.includes("mp4")) return "answer.mp4";
+  if (blob.type.includes("ogg")) return "answer.ogg";
+  return "answer.webm";
+}
+
 export async function transcribeAudio(blob: Blob): Promise<string> {
   const form = new FormData();
-  form.append("audio", blob, "answer.webm");
+  form.append("audio", blob, audioFilename(blob));
   const data = await request<{ transcript: string }>("/transcribe", {
     method: "POST",
     body: form,

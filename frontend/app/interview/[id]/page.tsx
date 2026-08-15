@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import ConversationHistory from "@/components/ConversationHistory";
@@ -11,14 +12,43 @@ import QuestionDisplay from "@/components/QuestionDisplay";
 import VoiceRecorder from "@/components/VoiceRecorder";
 import { Button } from "@/components/ui/button";
 import { useInterviewSession } from "@/hooks/useInterviewSession";
+import { useQuestionSpeech } from "@/hooks/useQuestionSpeech";
 import { getMode } from "@/lib/modes";
 
 const SHOW_DEBUG = process.env.NEXT_PUBLIC_DEBUG === "true";
+const AUTO_READ_KEY = "case-ai-auto-read-questions";
 
 export default function InterviewPage() {
   const params = useParams<{ id: string }>();
   const { session, error, submitting, ending, remainingSeconds, handleEnd, handleSubmit } =
     useInterviewSession(params.id);
+  const { speak, cancel, isSpeaking, supported } = useQuestionSpeech();
+  const [autoSpeak, setAutoSpeak] = useState(true);
+  const [autoSpeakReady, setAutoSpeakReady] = useState(false);
+
+  useEffect(() => {
+    const stored = window.localStorage.getItem(AUTO_READ_KEY);
+    if (stored === "false") setAutoSpeak(false);
+    setAutoSpeakReady(true);
+  }, []);
+
+  useEffect(() => {
+    if (!session || session.status !== "active" || !autoSpeakReady) return;
+    if (!autoSpeak) {
+      cancel();
+      return;
+    }
+    speak(session.current_question);
+  }, [session?.current_question, session?.status, autoSpeak, autoSpeakReady, speak, cancel]);
+
+  useEffect(() => {
+    if (session && session.status !== "active") cancel();
+  }, [session?.status, cancel]);
+
+  function handleAutoSpeakChange(value: boolean) {
+    setAutoSpeak(value);
+    window.localStorage.setItem(AUTO_READ_KEY, String(value));
+  }
 
   if (error && !session) {
     return <p className="p-8 text-sm text-red-600">{error}</p>;
@@ -67,11 +97,20 @@ export default function InterviewPage() {
         <EvaluationReport session={session} />
       ) : (
         <>
-          <QuestionDisplay question={session.current_question} />
+          <QuestionDisplay
+            question={session.current_question}
+            autoSpeak={autoSpeak}
+            onAutoSpeakChange={handleAutoSpeakChange}
+            isSpeaking={isSpeaking}
+            speechSupported={supported}
+            onListen={() => speak(session.current_question)}
+            onStop={cancel}
+          />
           <ConversationHistory turns={session.turns} />
           <VoiceRecorder
             disabled={session.status !== "active" || ending}
             submitting={submitting}
+            onRecordingStart={cancel}
             onSubmit={handleSubmit}
           />
         </>
