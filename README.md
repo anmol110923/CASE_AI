@@ -1,6 +1,6 @@
 # Personal AI Interview Practice Platform
 
-A local practice tool with five interview modes. You paste the content (case books, resume, JD, question lists). Gemini runs an adaptive interviewer, you answer by voice (Whisper), and you get a scored report. Questions are shown as text — there is no text-to-speech.
+A local practice tool with five interview modes. You paste the content (case books, resume, JD, question lists). Gemini runs an adaptive interviewer, questions can be read aloud in the browser, you answer by voice (Whisper), and you get a scored report.
 
 Sessions are stored in SQLite (`backend/data/case_ai.db`) so they survive backend restarts.
 
@@ -46,7 +46,7 @@ source .venv/bin/activate
 uvicorn app.main:app --reload --port 8005
 ```
 
-The first transcription downloads the Whisper `small` model (~500 MB). If transcription fails on WebM audio, install ffmpeg (`brew install ffmpeg` on macOS).
+The first transcription downloads the Whisper `small` model (~500 MB). If transcription fails on WebM audio, install ffmpeg (`brew install ffmpeg` on macOS). Question read-aloud uses the browser Speech Synthesis API (Chrome, Edge, and Safari).
 
 ### Frontend
 
@@ -63,7 +63,7 @@ Open [http://localhost:3000](http://localhost:3000). Set `NEXT_PUBLIC_DEBUG=true
 
 1. Choose a mode.
 2. Paste your custom prompt (and optionally a resume PDF for Resume Round). Set difficulty and duration.
-3. The interviewer asks an opening question.
-4. Record an answer, review the transcript, submit.
+3. The interviewer asks an opening question (shown as text and auto-read aloud; you can replay, stop, or turn auto-read off).
+4. Record an answer (speech stops so the mic does not capture the question), review the Whisper transcript, submit.
 5. Repeat until time is up or you end the interview.
 6. Read the evaluation report, export Markdown/JSON, or browse History.

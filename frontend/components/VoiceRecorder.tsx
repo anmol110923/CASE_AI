@@ -5,13 +5,21 @@ import { transcribeAudio } from "@/lib/api";
 
 type RecorderState = "idle" | "recording" | "transcribing" | "ready";
 
+function preferredRecorderMimeType(): string | undefined {
+  if (typeof MediaRecorder === "undefined") return undefined;
+  const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
+  return candidates.find((type) => MediaRecorder.isTypeSupported(type));
+}
+
 export default function VoiceRecorder({
   disabled,
   submitting,
+  onRecordingStart,
   onSubmit,
 }: {
   disabled: boolean;
   submitting: boolean;
+  onRecordingStart?: () => void;
   onSubmit: (transcript: string) => Promise<void>;
 }) {
   const [state, setState] = useState<RecorderState>("idle");
@@ -31,9 +39,11 @@ export default function VoiceRecorder({
 
   async function startRecording() {
     setError(null);
+    onRecordingStart?.();
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
+      const mimeType = preferredRecorderMimeType();
+      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
       chunksRef.current = [];
       recorder.ondataavailable = (event) => {
         if (event.data.size > 0) chunksRef.current.push(event.data);
@@ -72,7 +82,7 @@ export default function VoiceRecorder({
   async function handleSubmit() {
     const text = transcript.trim();
     if (!text) {
-      setError("Transcript is empty. Record again or type your answer.");
+      setError("Transcript is empty. Record again, or type your answer in the box above.");
       return;
     }
     await onSubmit(text);
