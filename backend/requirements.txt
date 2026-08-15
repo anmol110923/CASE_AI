@@ -5,3 +5,5 @@ faster-whisper
 python-multipart
 pydantic-settings
 python-dotenv
+sqlalchemy
+pypdf

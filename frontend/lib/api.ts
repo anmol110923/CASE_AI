@@ -1,6 +1,6 @@
-import type { CreateSessionPayload, Session } from "./types";
+import type { CreateSessionPayload, Session, SessionDebug, SessionSummary } from "./types";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8005";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, init);
@@ -25,8 +25,23 @@ export function createSession(payload: CreateSessionPayload): Promise<Session> {
   });
 }
 
+export function createSessionWithResume(form: FormData): Promise<Session> {
+  return request<Session>("/sessions/with-resume", {
+    method: "POST",
+    body: form,
+  });
+}
+
+export function listSessions(): Promise<SessionSummary[]> {
+  return request<SessionSummary[]>("/sessions");
+}
+
 export function getSession(id: string): Promise<Session> {
   return request<Session>(`/sessions/${id}`);
+}
+
+export function getSessionDebug(id: string): Promise<SessionDebug> {
+  return request<SessionDebug>(`/sessions/${id}/debug`);
 }
 
 export function submitTurn(id: string, answer: string): Promise<Session> {

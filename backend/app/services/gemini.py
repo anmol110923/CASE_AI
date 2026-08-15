@@ -4,86 +4,8 @@ import re
 import google.generativeai as genai
 
 from app.config import settings
-from app.models.schemas import Evaluation, DimensionScore, Difficulty, InterviewType, Turn
-
-TYPE_RUBRICS = {
-    "product_management": (
-        "Focus on user needs, prioritization frameworks, metrics "
-        "(North Star, funnel), trade-offs, and execution."
-    ),
-    "consulting": (
-        "Focus on MECE structure, hypothesis-driven analysis, "
-        "quantitative estimation, and synthesis."
-    ),
-    "general": (
-        "Blend of structure, analysis, and recommendation. "
-        "Probe both product and consulting instincts."
-    ),
-}
-
-TARGET_TURNS = {15: 7, 30: 13, 45: 20}
-
-DIMENSION_KEYS = [
-    "problem_framing",
-    "structure",
-    "analytical_reasoning",
-    "business_judgment",
-    "metrics",
-    "segmentation",
-    "prioritization",
-    "creativity",
-    "communication",
-    "depth_of_reasoning",
-    "handling_challenges",
-]
-
-
-def target_turns_for(duration_minutes: int) -> int:
-    return TARGET_TURNS.get(duration_minutes, 13)
-
-
-def build_system_prompt(
-    case_prompt: str,
-    interview_type: InterviewType,
-    difficulty: Difficulty,
-    duration_minutes: int,
-) -> str:
-    type_label = {
-        "product_management": "Product Management",
-        "consulting": "Consulting",
-        "general": "General Case",
-    }[interview_type]
-    target = target_turns_for(duration_minutes)
-    return f"""ROLE
-You are a senior {type_label} interviewer conducting a live case interview.
-You are demanding, direct, and professional — not a friendly tutor.
-
-CASE
-{case_prompt}
-
-INTERVIEW PARAMETERS
-- Difficulty: {difficulty}
-- Duration: {duration_minutes} minutes (~{target} Q&A exchanges)
-- Type-specific focus: {TYPE_RUBRICS[interview_type]}
-
-BEHAVIOR RULES
-1. Ask exactly ONE question at a time.
-2. Never reveal the answer or lead the candidate toward a specific solution.
-3. Challenge weak assumptions. Ask "why?" and "how would you validate that?"
-4. Probe structure, metrics, segmentation, prioritization, and business judgment.
-5. Adapt based on answers: increase difficulty when strong, dig into weak areas.
-6. Push back on vague or hand-wavy reasoning.
-7. Stay in character as a real interviewer, not a coach.
-
-DIFFICULTY CALIBRATION
-- Easy: more guidance on structure, gentler pushback
-- Medium: standard consulting/PM bar
-- Hard: aggressive challenges, introduce complications, less patience for gaps
-
-OUTPUT FORMAT
-Respond in JSON only:
-{{ "next_question": "...", "should_end": false, "difficulty_adjustment": "maintain|increase|decrease" }}
-"""
+from app.models.schemas import DimensionScore, Evaluation, InterviewMode, Turn
+from app.services.prompts import dimension_keys_for
 
 
 def _configure() -> None:
@@ -92,14 +14,48 @@ def _configure() -> None:
     genai.configure(api_key=settings.gemini_api_key)
 
 
-def _model(system_instruction: str):
+def extract_usage(response) -> dict:
+    meta = getattr(response, "usage_metadata", None)
+    if meta is None:
+        return {"prompt": 0, "output": 0, "total": 0}
+    prompt = int(getattr(meta, "prompt_token_count", 0) or 0)
+    output = int(getattr(meta, "candidates_token_count", 0) or 0)
+    total = int(getattr(meta, "total_token_count", 0) or 0) or (prompt + output)
+    return {"prompt": prompt, "output": output, "total": total}
+
+
+def _interviewer_model(system_instruction: str):
     _configure()
     return genai.GenerativeModel(
-        model_name=settings.gemini_model,
+        model_name=settings.interviewer_model_name,
         system_instruction=system_instruction,
         generation_config={
             "response_mime_type": "application/json",
             "temperature": 0.7,
+            "max_output_tokens": settings.max_output_tokens_interviewer,
+        },
+    )
+
+
+def _eval_model():
+    _configure()
+    return genai.GenerativeModel(
+        model_name=settings.eval_model_name,
+        generation_config={
+            "response_mime_type": "application/json",
+            "temperature": 0.3,
+            "max_output_tokens": settings.max_output_tokens_eval,
+        },
+    )
+
+
+def _summary_model():
+    _configure()
+    return genai.GenerativeModel(
+        model_name=settings.summary_model_name,
+        generation_config={
+            "temperature": 0.2,
+            "max_output_tokens": settings.max_output_tokens_summary,
         },
     )
 
@@ -112,7 +68,7 @@ def _parse_json(text: str) -> dict:
     return json.loads(text)
 
 
-def _format_transcript(turns: list[Turn]) -> str:
+def format_transcript(turns: list[Turn]) -> str:
     lines: list[str] = []
     for turn in turns:
         label = "Interviewer" if turn.role == "interviewer" else "Candidate"
@@ -136,54 +92,76 @@ def _turn_payload(text: str, force_end: bool = False) -> dict:
     }
 
 
-def generate_opening_question(system_prompt: str) -> dict:
-    model = _model(system_prompt)
+def generate_opening_question(system_prompt: str) -> tuple[dict, dict]:
+    model = _interviewer_model(system_prompt)
     response = model.generate_content(
-        "Begin the interview. Greet the candidate briefly, then ask your opening question "
-        "to start the case. Output JSON only."
+        "Begin the interview. Greet the candidate briefly, then ask your opening question. "
+        "Output JSON only."
     )
-    return _turn_payload(response.text)
+    return _turn_payload(response.text), extract_usage(response)
 
 
 def generate_next_turn(
     system_prompt: str,
-    turns: list[Turn],
+    context_summary: str | None,
+    recent_turns: list[Turn],
     candidate_answer: str,
     turns_remaining: int,
-) -> dict:
-    model = _model(system_prompt)
-    prior = _format_transcript(turns)
-    prompt = (
-        f"INTERVIEW SO FAR\n{prior}\n\n"
-        f"LATEST CANDIDATE ANSWER\n{candidate_answer}\n\n"
+) -> tuple[dict, dict]:
+    model = _interviewer_model(system_prompt)
+    parts: list[str] = []
+    if context_summary:
+        parts.append(f"PRIOR SUMMARY\n{context_summary}")
+    prior = format_transcript(recent_turns)
+    if prior:
+        parts.append(f"RECENT EXCHANGES\n{prior}")
+    parts.append(f"LATEST CANDIDATE ANSWER\n{candidate_answer}")
+    parts.append(
         f"Turns remaining (including this follow-up): {turns_remaining}.\n"
         "Evaluate the answer internally. Ask one probing follow-up. "
         "If the interview should wrap up (time/turns exhausted or you have enough signal), "
         "set should_end to true and ask a closing synthesis question. JSON only."
     )
+    response = model.generate_content("\n\n".join(parts))
+    return _turn_payload(response.text, force_end=turns_remaining <= 1), extract_usage(response)
+
+
+def summarize_history(
+    older_turns: list[Turn],
+    existing_summary: str | None,
+) -> tuple[str, dict]:
+    transcript = format_transcript(older_turns)
+    prior = existing_summary.strip() if existing_summary else "(none)"
+    prompt = (
+        "Update the running interview summary. Be compact (bullet points).\n"
+        "Cover: topics already asked, candidate strengths/weaknesses observed, "
+        "numbers or frameworks they used, and anything to avoid repeating.\n\n"
+        f"EXISTING SUMMARY\n{prior}\n\n"
+        f"OLDER TURNS TO FOLD IN\n{transcript}\n\n"
+        "Return only the updated summary text, no JSON."
+    )
+    model = _summary_model()
     response = model.generate_content(prompt)
-    return _turn_payload(response.text, force_end=turns_remaining <= 1)
+    text = (response.text or "").strip()
+    return text, extract_usage(response)
 
 
 def generate_evaluation(
-    case_prompt: str,
-    interview_type: InterviewType,
-    difficulty: Difficulty,
+    custom_prompt: str,
+    mode: InterviewMode,
+    difficulty: str,
     turns: list[Turn],
-) -> Evaluation:
-    transcript_lines = []
-    for turn in turns:
-        label = "Interviewer" if turn.role == "interviewer" else "Candidate"
-        transcript_lines.append(f"{label}: {turn.content}")
-    transcript = "\n\n".join(transcript_lines)
+) -> tuple[Evaluation, dict]:
+    keys = dimension_keys_for(mode)
+    dim_block = ",\n    ".join(f'"{k}": {{ "score": 0, "explanation": "" }}' for k in keys)
+    transcript = format_transcript(turns)
+    prompt = f"""You are scoring a completed interview. Be rigorous and specific.
 
-    prompt = f"""You are scoring a completed case interview. Be rigorous and specific.
-
-CASE
-{case_prompt}
-
-INTERVIEW TYPE: {interview_type}
+MODE: {mode}
 DIFFICULTY: {difficulty}
+
+CANDIDATE-SUPPLIED CONTENT
+{custom_prompt}
 
 TRANSCRIPT
 {transcript}
@@ -195,17 +173,7 @@ Return JSON only with this exact shape:
 {{
   "overall_score": 0,
   "dimensions": {{
-    "problem_framing": {{ "score": 0, "explanation": "" }},
-    "structure": {{ "score": 0, "explanation": "" }},
-    "analytical_reasoning": {{ "score": 0, "explanation": "" }},
-    "business_judgment": {{ "score": 0, "explanation": "" }},
-    "metrics": {{ "score": 0, "explanation": "" }},
-    "segmentation": {{ "score": 0, "explanation": "" }},
-    "prioritization": {{ "score": 0, "explanation": "" }},
-    "creativity": {{ "score": 0, "explanation": "" }},
-    "communication": {{ "score": 0, "explanation": "" }},
-    "depth_of_reasoning": {{ "score": 0, "explanation": "" }},
-    "handling_challenges": {{ "score": 0, "explanation": "" }}
+    {dim_block}
   }},
   "strongest_areas": ["..."],
   "weakest_areas": ["..."],
@@ -216,27 +184,20 @@ Return JSON only with this exact shape:
   "final_recommendation": "..."
 }}
 """
-    _configure()
-    model = genai.GenerativeModel(
-        model_name=settings.gemini_model,
-        generation_config={
-            "response_mime_type": "application/json",
-            "temperature": 0.3,
-        },
-    )
+    model = _eval_model()
     response = model.generate_content(prompt)
     data = _parse_json(response.text)
 
     dimensions: dict[str, DimensionScore] = {}
     raw_dims = data.get("dimensions", {})
-    for key in DIMENSION_KEYS:
+    for key in keys:
         item = raw_dims.get(key, {})
         dimensions[key] = DimensionScore(
             score=int(item.get("score", 0)),
             explanation=str(item.get("explanation", "")),
         )
 
-    return Evaluation(
+    evaluation = Evaluation(
         overall_score=int(data.get("overall_score", 0)),
         dimensions=dimensions,
         strongest_areas=list(data.get("strongest_areas", [])),
@@ -247,3 +208,4 @@ Return JSON only with this exact shape:
         practice_recommendations=list(data.get("practice_recommendations", [])),
         final_recommendation=str(data.get("final_recommendation", "")),
     )
+    return evaluation, extract_usage(response)
